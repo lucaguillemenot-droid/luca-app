@@ -300,7 +300,19 @@ render.today = function() {
   }));
   v.querySelectorAll("[data-meal-swap]").forEach(b => b.addEventListener("click", e => {
     e.stopPropagation();
-    openMealSwap(parseInt(b.dataset.mealSwap), b.dataset.currentId);
+    const slotIdx = parseInt(b.dataset.mealSwap);
+    const currentId = b.dataset.currentId;
+    // Cycle through every meal in this slot (bk_, ln_, pw_, sn_, dn_, ev_).
+    const prefix = currentId.split("_")[0] + "_";
+    const allOptions = Object.keys(MEAL_LIBRARY).filter(id => id.startsWith(prefix));
+    if (allOptions.length <= 1) { toast("Only one meal in this slot"); return; }
+    const next = allOptions[(allOptions.indexOf(currentId) + 1) % allOptions.length];
+    const dateKey = isoDate();
+    S.mealOverrides[dateKey] = S.mealOverrides[dateKey] || {};
+    S.mealOverrides[dateKey][slotIdx] = next;
+    save();
+    render.today();
+    toast(`Swapped → ${MEAL_LIBRARY[next].name}`);
   }));
   v.querySelectorAll("[data-supp]").forEach(b => b.addEventListener("click", () => {
     const id = b.dataset.supp;
