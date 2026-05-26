@@ -191,6 +191,39 @@ function macroBar(label, val, target, fillClass, unit="g") {
 const render = {};
 render.today = function() {
   const date = new Date();
+  // Pre-start: hide meals/macros/workout until the program officially starts.
+  const startStr = PROFILE.programStartDate;
+  if (startStr) {
+    const today = isoDate(date);
+    if (today < startStr) {
+      const start = new Date(startStr + "T00:00:00");
+      const msLeft = start - date;
+      const daysLeft = Math.max(1, Math.ceil(msLeft / 86400000));
+      const niceDate = start.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+      const v0 = document.getElementById("view-today");
+      v0.innerHTML = `
+        <div class="card hero">
+          <div class="hero-day">Bulk starts ${niceDate}</div>
+          <div class="hero-workout">${daysLeft} day${daysLeft === 1 ? "" : "s"} to go</div>
+          <div class="hero-prog">Today is a free day — eat normally, rest up.</div>
+        </div>
+        <div class="card">
+          <h2>Use today to prep</h2>
+          <ul style="margin:6px 0 0 18px; padding:0; line-height:1.7;">
+            <li>Open the <b>Plan</b> tab and look over the 14-day rotation</li>
+            <li>Tap any day to see meals and shopping list</li>
+            <li>Open the <b>Glucose</b> tab and log a baseline reading</li>
+            <li>In <b>Settings</b>, double-check your weight / targets / Thursday cycle</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h2>Change the start date</h2>
+          <div class="text-dim small">Open <code>data.js</code> and edit <code>PROFILE.programStartDate</code>. The Today tab returns to normal once the date matches.</div>
+        </div>
+      `;
+      return;
+    }
+  }
   const dow = dayOfWeek(date);
   const cd = cycleDay(date);
   const meals = getDayMeals(date);

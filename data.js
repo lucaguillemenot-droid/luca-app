@@ -19,6 +19,7 @@ export const PROFILE = {
   targetFat: 230,
   targetWaterMl: 3500,
   targetFiber: 30,
+  programStartDate: "2026-05-27", // bulk starts this date (YYYY-MM-DD). Plan / meals hidden on the Today tab before this.
 };
 
 // FOOD DATABASE — values per 100 g/ml. Prices approximate REMA/Kiwi spring 2026.
@@ -279,7 +280,7 @@ export const MEAL_LIBRARY = {
 export const WEEK_PLAN = {
   1: { day: "Monday",    workout: "push",  meals: ["bk_omelet",    "pw_oats",         "sn_yogurt_almonds", "dn_chicken_broc",  "ev_cottage"] },
   2: { day: "Tuesday",   workout: "pull",  meals: ["bk_skyr",      "pw_ricebowl",     "sn_kvarg_pb",       "dn_pork_lentils",  "ev_kvarg_almonds"] },
-  3: { day: "Wednesday", workout: "legs",  meals: ["bk_bacon_eggs","pw_potato",       "sn_cottage_walnut", "dn_salmon",        "ev_milk_pb"] },
+  3: { day: "Wednesday", workout: "push",  meals: ["bk_bacon_eggs","pw_potato",       "sn_cottage_walnut", "dn_salmon",        "ev_milk_pb"] },
   4: { day: "Thursday",  workout: "rest",  meals: ["bk_omelet",    "ln_mackerel",     "sn_cheese_almonds", "dn_taco_bowl",     "ev_cottage"] },
   5: { day: "Friday",    workout: "push",  meals: ["bk_skyr",      "pw_pasta",        "sn_yogurt_almonds", "dn_chicken_curry", "ev_kvarg_almonds"] },
   6: { day: "Saturday",  workout: "pull",  meals: ["bk_herring",   "pw_oats",         "sn_kvarg_pb",       "dn_chicken_broc",  "ev_milk_pb"] },
@@ -394,7 +395,7 @@ export const WORKOUT_WEEK = WEEK_PLAN;
 const _WEEK_B = {
   1: { day: "Monday",    workout: "push",  meals: ["bk_skyr",      "pw_pasta",     "sn_kvarg_pb",       "dn_chicken_curry", "ev_milk_pb"] },
   2: { day: "Tuesday",   workout: "pull",  meals: ["bk_bacon_eggs","pw_potato",    "sn_cottage_walnut", "dn_salmon",        "ev_cottage"] },
-  3: { day: "Wednesday", workout: "legs",  meals: ["bk_herring",   "pw_ricebowl",  "sn_cheese_almonds", "dn_taco_bowl",     "ev_kvarg_almonds"] },
+  3: { day: "Wednesday", workout: "push",  meals: ["bk_herring",   "pw_ricebowl",  "sn_cheese_almonds", "dn_taco_bowl",     "ev_kvarg_almonds"] },
   4: { day: "Thursday",  workout: "rest",  meals: ["bk_skyr",      "ln_tuna_salad","sn_yogurt_almonds", "dn_chicken_broc",  "ev_milk_pb"] },
   5: { day: "Friday",    workout: "push",  meals: ["bk_omelet",    "pw_oats",      "sn_kvarg_pb",       "dn_pork_lentils",  "ev_cottage"] },
   6: { day: "Saturday",  workout: "pull",  meals: ["bk_bacon_eggs","pw_potato",    "sn_yogurt_almonds", "dn_salmon",        "ev_kvarg_almonds"] },
