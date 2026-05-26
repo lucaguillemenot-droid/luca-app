@@ -631,11 +631,14 @@ render.scan = function() {
   document.getElementById("stop-scan").addEventListener("click", stopScanner);
   document.getElementById("food-search").addEventListener("input", e => {
     const q = e.target.value.toLowerCase().trim();
-    const results = Object.entries(FOODS)
-      .filter(([id, f]) => f.name.toLowerCase().includes(q))
-      .slice(0, 12)
+    // Search BOTH built-in FOODS and previously-scanned customFoods, so a
+    // milk you scanned last week is one search away today.
+    const combined = { ...FOODS, ...(S.customFoods || {}) };
+    const results = Object.entries(combined)
+      .filter(([id, f]) => f && f.name && f.name.toLowerCase().includes(q))
+      .slice(0, 20)
       .map(([id, f]) => foodPickRow(id, f)).join("");
-    document.getElementById("food-results").innerHTML = q ? (results || `<div class="text-dim small">No match.</div>`) : "";
+    document.getElementById("food-results").innerHTML = q ? (results || `<div class="text-dim small">No match. Scan it instead, or check spelling.</div>`) : "";
   });
   renderTodayExtras();
 };
@@ -715,10 +718,18 @@ async function startScanner() {
   }
   try {
     stopScanner();
-    scannerInstance = new window.Html5Qrcode("qr-reader");
+    const supportedFormats = window.Html5QrcodeSupportedFormats ? [
+      window.Html5QrcodeSupportedFormats.EAN_13,
+      window.Html5QrcodeSupportedFormats.EAN_8,
+      window.Html5QrcodeSupportedFormats.UPC_A,
+      window.Html5QrcodeSupportedFormats.UPC_E,
+      window.Html5QrcodeSupportedFormats.CODE_128,
+      window.Html5QrcodeSupportedFormats.QR_CODE,
+    ] : undefined;
+    scannerInstance = new window.Html5Qrcode("qr-reader", supportedFormats ? { formatsToSupport: supportedFormats } : undefined);
     await scannerInstance.start(
       { facingMode: "environment" },
-      { fps: 10, qrbox: { width: 260, height: 160 } },
+      { fps: 10, qrbox: { width: 280, height: 180 }, aspectRatio: 1.333 },
       async (decoded) => {
         await scannerInstance.stop(); scannerInstance.clear(); scannerInstance = null;
         result.innerHTML = `<div class="scan-result">Scanned: <b>${decoded}</b><br><span class="text-dim small">Looking up Open Food Facts…</span></div>`;
@@ -743,9 +754,11 @@ async function lookupBarcode(code) {
       return;
     }
     const p = j.product, nutr = p.nutriments || {};
+    const brand = p.brands ? p.brands.split(",")[0].trim() : "";
+    const fullName = [brand, p.product_name || p.generic_name].filter(Boolean).join(" — ") || `Unknown (${code})`;
     const food = {
-      name: p.product_name || p.generic_name || `Unknown (${code})`,
-      unit: "g",
+      name: fullName,
+      unit: (p.serving_quantity_unit || "g").toLowerCase().includes("ml") ? "ml" : "g",
       kcal: round(nutr["energy-kcal_100g"] || (nutr["energy_100g"]||0)/4.184),
       p: round(nutr.proteins_100g || 0, 1),
       c: round(nutr.carbohydrates_100g || 0, 1),
@@ -754,9 +767,17 @@ async function lookupBarcode(code) {
       pricePer100: 0, micros: {},
     };
     S.customFoods[code] = food; save();
+    const imgUrl = p.image_front_small_url || p.image_url || "";
+    const servingHint = p.serving_size ? `<div class="text-dim small">Typical serving: ${p.serving_size}</div>` : "";
     result.innerHTML = `<div class="scan-result">
-      <div style="font-weight:600">${food.name}</div>
-      <div class="text-dim small">${food.kcal} kcal · ${food.p}P / ${food.c}C / ${food.f}F per 100g</div>
+      <div class="row" style="gap:12px;align-items:flex-start">
+        ${imgUrl ? `<img src="${imgUrl}" alt="" style="width:64px;height:64px;object-fit:contain;background:#fff;border-radius:8px;flex-shrink:0">` : ""}
+        <div style="flex:1">
+          <div style="font-weight:600">${food.name}</div>
+          <div class="text-dim small">${food.kcal} kcal · ${food.p}P / ${food.c}C / ${food.f}F per 100${food.unit}</div>
+          ${servingHint}
+        </div>
+      </div>
       <button class="btn btn-primary big" id="log-scanned" style="margin-top:10px;width:100%">Log amount →</button>
     </div>`;
     document.getElementById("log-scanned").addEventListener("click", () => promptAmountAndLog(code));
