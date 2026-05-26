@@ -1113,9 +1113,38 @@ render.settings = function() {
 document.getElementById("page-date").textContent = fmtDate();
 switchTab("today");
 
-// Service worker
+// Service worker — auto-update: re-check sw.js on focus / every 30 min,
+// activate new SW immediately, reload the page once it takes control.
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./sw.js").catch(err => console.warn("SW registration failed:", err));
+  navigator.serviceWorker.register("./sw.js").then(reg => {
+    // Periodic update poll while the app is open
+    setInterval(() => reg.update().catch(() => {}), 30 * 60 * 1000);
+    // Check whenever the tab regains focus (e.g. PWA brought to foreground)
+    window.addEventListener("focus", () => reg.update().catch(() => {}));
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") reg.update().catch(() => {});
+    });
+    // If a new SW is waiting, tell it to activate now
+    function activateWaiting() {
+      if (reg.waiting) reg.waiting.postMessage("SKIP_WAITING");
+    }
+    if (reg.waiting) activateWaiting();
+    reg.addEventListener("updatefound", () => {
+      const nw = reg.installing;
+      if (!nw) return;
+      nw.addEventListener("statechange", () => {
+        if (nw.state === "installed" && navigator.serviceWorker.controller) activateWaiting();
+      });
+    });
+  }).catch(err => console.warn("SW registration failed:", err));
+
+  // When a new SW takes control, reload once to pick up fresh assets.
+  let reloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloading) return;
+    reloading = true;
+    location.reload();
+  });
 }
 
 // Re-render today at midnight rollover (best effort)
