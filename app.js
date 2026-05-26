@@ -1096,3 +1096,22 @@ render.settings = function() {
     location.reload();
   });
 };
+
+// ---------- Init ----------
+document.getElementById("page-date").textContent = fmtDate();
+switchTab("today");
+
+// Service worker
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./sw.js").catch(err => console.warn("SW registration failed:", err));
+}
+
+// Re-render today at midnight rollover (best effort)
+setInterval(() => {
+  const stillToday = document.querySelector('[data-tab="today"]').classList.contains("active");
+  if (stillToday) {
+    const cur = document.getElementById("page-date").textContent;
+    const now = fmtDate();
+    if (cur !== now) { document.getElementById("page-date").textContent = now; render.today(); }
+  }
+}, 60000);
