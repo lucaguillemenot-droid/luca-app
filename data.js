@@ -380,3 +380,41 @@ export const SUN_LOGIC = {
   mcgPerMinPerUV: 0.4, // rough: 25 mcg from 15 min @ UV4 with arms+legs exposed
   warningWinter: "Between October and March in Oslo, your skin cannot make Vitamin D from sunlight (sun angle too low). Supplement 25-50 mcg D3 daily.",
 };
+
+// =====================================================================
+// v3 SHIM — added to satisfy app.js v3 imports until a real updated
+// data.js arrives. These are placeholders; replace when possible.
+// =====================================================================
+
+// WORKOUT_WEEK is structurally identical to WEEK_PLAN — alias it.
+export const WORKOUT_WEEK = WEEK_PLAN;
+
+// MEAL_CYCLE: 14-day cycle. Placeholder = WEEK_PLAN repeated twice.
+// Replace with the real fortnightly rotation when available.
+export const MEAL_CYCLE = (() => {
+  const out = {};
+  for (let cd = 1; cd <= 14; cd++) {
+    const wk = ((cd - 1) % 7) + 1;
+    out[cd] = WEEK_PLAN[wk];
+  }
+  return out;
+})();
+
+// GLUCOSE_CONTEXTS: standard logging-context labels. Placeholder set —
+// replace with your preferred labels when the real data.js lands.
+export const GLUCOSE_CONTEXTS = [
+  { id: "fasting",    label: "Fasting" },
+  { id: "pre_meal",   label: "Before meal" },
+  { id: "post_meal",  label: "After meal (2h)" },
+  { id: "bedtime",    label: "Bedtime" },
+  { id: "exercise",   label: "Around exercise" },
+  { id: "correction", label: "Correction check" },
+  { id: "other",      label: "Other" },
+];
+
+// getAlternatives: returns swap candidates for a given meal id.
+// Placeholder returns []; the "Swap meal" UI will show no options
+// until the real function is provided.
+export function getAlternatives(_currentId) {
+  return [];
+}
