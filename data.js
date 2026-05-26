@@ -382,26 +382,35 @@ export const SUN_LOGIC = {
 };
 
 // =====================================================================
-// v3 SHIM — added to satisfy app.js v3 imports until a real updated
-// data.js arrives. These are placeholders; replace when possible.
+//  v3 — exports required by app.js v3 (per-day shopping list, etc.)
 // =====================================================================
 
-// WORKOUT_WEEK is structurally identical to WEEK_PLAN — alias it.
+// WORKOUT_WEEK: structurally identical to WEEK_PLAN — alias it.
 export const WORKOUT_WEEK = WEEK_PLAN;
 
-// MEAL_CYCLE: 14-day cycle. Placeholder = WEEK_PLAN repeated twice.
-// Replace with the real fortnightly rotation when available.
+// MEAL_CYCLE: full 14-day rotation.
+// Week A (days 1-7) = your existing WEEK_PLAN, untouched.
+// Week B (days 8-14) = same workout schedule, varied meals picked from
+// MEAL_LIBRARY so weekly shopping lists differ and you avoid repetition.
+// Edit any day directly to suit personal taste.
+const _WEEK_B = {
+  1: { day: "Monday",    workout: "push",  meals: ["bk_skyr",      "pw_pasta",     "sn_kvarg_pb",       "dn_chicken_curry", "ev_milk_pb"] },
+  2: { day: "Tuesday",   workout: "pull",  meals: ["bk_bacon_eggs","pw_potato",    "sn_cottage_walnut", "dn_salmon",        "ev_cottage"] },
+  3: { day: "Wednesday", workout: "legs",  meals: ["bk_herring",   "pw_ricebowl",  "sn_cheese_almonds", "dn_taco_bowl",     "ev_kvarg_almonds"] },
+  4: { day: "Thursday",  workout: "rest",  meals: ["bk_skyr",      "ln_tuna_salad","sn_yogurt_almonds", "dn_chicken_broc",  "ev_milk_pb"] },
+  5: { day: "Friday",    workout: "push",  meals: ["bk_omelet",    "pw_oats",      "sn_kvarg_pb",       "dn_pork_lentils",  "ev_cottage"] },
+  6: { day: "Saturday",  workout: "pull",  meals: ["bk_bacon_eggs","pw_potato",    "sn_yogurt_almonds", "dn_salmon",        "ev_kvarg_almonds"] },
+  7: { day: "Sunday",    workout: "legs",  meals: ["bk_herring",   "ln_tuna_salad","sn_cottage_walnut", "dn_chicken_curry", "ev_milk_pb"] },
+};
 export const MEAL_CYCLE = (() => {
   const out = {};
-  for (let cd = 1; cd <= 14; cd++) {
-    const wk = ((cd - 1) % 7) + 1;
-    out[cd] = WEEK_PLAN[wk];
-  }
+  for (let cd = 1; cd <= 7;  cd++) out[cd]     = WEEK_PLAN[cd];
+  for (let cd = 1; cd <= 7;  cd++) out[cd + 7] = _WEEK_B[cd];
   return out;
 })();
 
-// GLUCOSE_CONTEXTS: standard logging-context labels. Placeholder set —
-// replace with your preferred labels when the real data.js lands.
+// GLUCOSE_CONTEXTS: standard T1D logging contexts. Reorder / rename
+// any entry to suit your habits.
 export const GLUCOSE_CONTEXTS = [
   { id: "fasting",    label: "Fasting" },
   { id: "pre_meal",   label: "Before meal" },
@@ -412,9 +421,11 @@ export const GLUCOSE_CONTEXTS = [
   { id: "other",      label: "Other" },
 ];
 
-// getAlternatives: returns swap candidates for a given meal id.
-// Placeholder returns []; the "Swap meal" UI will show no options
-// until the real function is provided.
-export function getAlternatives(_currentId) {
-  return [];
+// getAlternatives: meals in the same slot (bk/ln/pw/sn/dn/ev) other than
+// the current one, so the "Swap meal" button shows real options.
+export function getAlternatives(currentId) {
+  if (!currentId || typeof currentId !== "string") return [];
+  const prefix = currentId.split("_")[0] + "_";
+  return Object.keys(MEAL_LIBRARY)
+    .filter(id => id.startsWith(prefix) && id !== currentId);
 }

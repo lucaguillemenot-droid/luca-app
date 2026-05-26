@@ -1080,4 +1080,19 @@ render.settings = function() {
     S.weekRefIsA = (choice === "A");
     save(); render.settings(); toast(`This week's Thursday: ${choice}`);
   });
+  document.getElementById("reset-today")?.addEventListener("click", () => {
+    if (!confirm("Reset today's log? Logged meals, water, glucose, weight, and workout for today will be cleared.")) return;
+    const d = isoDate();
+    S.log[d] = { water: 0, mealsDone: [], glucose: [], weight: null, sun: null, supps: [], extras: [], workout: {} };
+    save();
+    render.settings();
+    toast("Today's log reset");
+  });
+  document.getElementById("reset-all")?.addEventListener("click", () => {
+    if (!confirm("ERASE ALL DATA? This deletes everything stored locally: profile, logs, custom foods, settings. Cannot be undone.")) return;
+    if (!confirm("Really wipe everything? Tap OK to confirm.")) return;
+    localStorage.removeItem(KEY);
+    localStorage.removeItem("luca-bulk-v1");
+    location.reload();
+  });
 };

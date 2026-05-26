@@ -1,5 +1,5 @@
 // Service worker v2 — bumped cache to force refresh after update
-const CACHE = "luca-bulk-v3";
+const CACHE = "luca-bulk-v4";
 const ASSETS = [
   "./",
   "./index.html",
