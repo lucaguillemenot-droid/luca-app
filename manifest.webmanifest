@@ -1,0 +1,16 @@
+{
+  "name": "Luca Bulk — T1D Nutrition & Lifting",
+  "short_name": "Luca Bulk",
+  "description": "Personalised PWA: PPL workouts, T1D-aware nutrition, Vitamin D & micros, barcode scanning.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0b1220",
+  "background_color": "#0b1220",
+  "lang": "en",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
