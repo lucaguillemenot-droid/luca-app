@@ -555,12 +555,17 @@ render.plan = function() {
       <div class="text-dim small">${macros.kcal} kcal · ${macros.p}P / ${macros.c}C / ${macros.f}F · ${macros.cost} NOK</div>
       ${meals.map(id => {
         const m = MEAL_LIBRARY[id]; const mm = mealMacros(id);
+        const itemsStr = m.items.map(it => {
+          const f = FOODS[it.id]; if (!f) return "";
+          return `${it.g}${f.unit||"g"} ${f.name}`;
+        }).filter(Boolean).join(" · ");
         return `<div class="meal-mini">
           <div class="meal-mini-name">${m.name}${m.preWorkout?'<span class="pre-workout-badge">pre-WO</span>':''}</div>
-          <div class="text-dim small">${mm.kcal} kcal · ${mm.p}P/${mm.c}C/${mm.f}F · ~${mm.cost} NOK</div>
+          <div class="small" style="margin-top:4px">${itemsStr}</div>
+          <div class="text-dim small" style="margin-top:2px">${mm.kcal} kcal · ${mm.p}P/${mm.c}C/${mm.f}F · ~${mm.cost} NOK</div>
         </div>`;
       }).join("")}
-      <details class="day-shop">
+      <details class="day-shop" open>
         <summary>🛒 Shopping list for this day · ${round(dayShopCost)} NOK</summary>
         <div class="shop-list" style="margin-top:8px">${dayShopRows}</div>
       </details>
