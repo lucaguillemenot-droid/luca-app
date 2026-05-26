@@ -1079,3 +1079,5 @@ render.settings = function() {
     S.weekRefDate = isoDate(mon);
     S.weekRefIsA = (choice === "A");
     save(); render.settings(); toast(`This week's Thursday: ${choice}`);
+  });
+};
