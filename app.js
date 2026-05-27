@@ -718,28 +718,66 @@ async function startScanner() {
   }
   try {
     stopScanner();
-    const supportedFormats = window.Html5QrcodeSupportedFormats ? [
-      window.Html5QrcodeSupportedFormats.EAN_13,
-      window.Html5QrcodeSupportedFormats.EAN_8,
-      window.Html5QrcodeSupportedFormats.UPC_A,
-      window.Html5QrcodeSupportedFormats.UPC_E,
-      window.Html5QrcodeSupportedFormats.CODE_128,
-      window.Html5QrcodeSupportedFormats.QR_CODE,
-    ] : undefined;
-    scannerInstance = new window.Html5Qrcode("qr-reader", supportedFormats ? { formatsToSupport: supportedFormats } : undefined);
+    // No constructor format restriction — html5-qrcode 2.3.8 supports all
+    // common 1D + QR formats by default. Enabling the native BarcodeDetector
+    // (iOS 17+, Chrome) makes decoding dramatically faster and more reliable.
+    scannerInstance = new window.Html5Qrcode("qr-reader", {
+      verbose: false,
+      useBarCodeDetectorIfSupported: true,
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+    });
+    let attempts = 0;
+    const startedAt = Date.now();
     await scannerInstance.start(
       { facingMode: "environment" },
-      { fps: 10, qrbox: { width: 280, height: 180 }, aspectRatio: 1.333 },
+      {
+        fps: 15,
+        // Wide rectangular scan box — grocery barcodes (EAN-13/UPC-A) are
+        // ~2:1 wide-rectangles, NOT square. Computed dynamically from the
+        // actual viewfinder size so it fits both portrait and landscape.
+        qrbox: (vw, vh) => {
+          const w = Math.max(260, Math.floor(vw * 0.86));
+          const h = Math.max(120, Math.floor(Math.min(vw, vh) * 0.36));
+          return { width: w, height: h };
+        },
+        // Request HD video — default 640x480 is often too low-res for the
+        // narrow black/white stripes of EAN/UPC to be clean enough to decode.
+        videoConstraints: {
+          facingMode: "environment",
+          width:  { ideal: 1920, min: 1280 },
+          height: { ideal: 1080, min: 720 },
+          // iOS Safari 17+ supports torch via constraints — falls back gracefully
+          advanced: [{ focusMode: "continuous" }],
+        },
+      },
       async (decoded) => {
-        await scannerInstance.stop(); scannerInstance.clear(); scannerInstance = null;
+        try { await scannerInstance.stop(); scannerInstance.clear(); } catch {}
+        scannerInstance = null;
         result.innerHTML = `<div class="scan-result">Scanned: <b>${decoded}</b><br><span class="text-dim small">Looking up Open Food Facts…</span></div>`;
         await lookupBarcode(decoded);
       },
-      () => {}
+      () => {
+        // Per-frame decode-failure callback. Don't spam the user — but if we've
+        // been trying for a while with no success, give a real hint.
+        attempts++;
+        if (attempts === 50 || attempts === 200) {
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          result.innerHTML = `<div class="text-dim small">
+            Looking for a barcode… (${elapsed}s)<br>
+            <b>Tips:</b> hold the phone steady ~10–15 cm from the barcode,
+            fill the scan box with the barcode, good lighting helps.
+            Wide barcodes scan best in landscape.
+          </div>`;
+        }
+      }
     );
   } catch (e) {
     console.error(e);
-    result.innerHTML = `<div class="vitd-warning">Camera blocked. On iPhone: Settings → Safari → Camera → Allow. Then reload this app.</div>`;
+    let msg = "Camera blocked. On iPhone: Settings → Safari → Camera → Allow. Then reload this app.";
+    if (e && e.name === "NotAllowedError") msg = "You denied camera access. iPhone: Settings → Safari → Camera → Allow, then reload.";
+    else if (e && e.name === "NotFoundError") msg = "No camera available on this device.";
+    else if (e && e.message) msg += `\n\n(${e.message})`;
+    result.innerHTML = `<div class="vitd-warning">${msg}</div>`;
   }
 }
 
