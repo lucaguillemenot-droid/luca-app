@@ -161,6 +161,7 @@ function switchTab(name) {
   render[name]();
   window.scrollTo(0, 0);
   if (name !== "scan") stopScanner();
+  if (name !== "today") cancelRestTimer();
 }
 
 // ---------- Toast / sheet ----------
@@ -383,8 +384,63 @@ render.today = function() {
     log.workout[exId][setNum] = log.workout[exId][setNum] || { w: "", r: "" };
     log.workout[exId][setNum][field] = inp.value;
     save();
+    // When both w and r are now filled: (1) PR detection vs historic best, (2) start rest timer.
+    const s = log.workout[exId][setNum];
+    const w = parseFloat(s.w), r = parseInt(s.r);
+    if (!isNaN(w) && !isNaN(r) && w > 0 && r > 0) {
+      const est = calc1RM(w, r);
+      const oldPR = exercisePR(exId, false);
+      if (est && (!oldPR || est > oldPR.est1RM)) {
+        toast(`PR! ${w}kg × ${r} (est 1RM ${est}kg) — beats ${oldPR ? oldPR.est1RM + 'kg' : 'baseline'}`);
+        if (navigator.vibrate) navigator.vibrate([60, 40, 60, 40, 200]);
+      }
+      // Only start rest timer if we just completed both fields (avoid restarting on edits)
+      if (field === "r") startRestTimer(defaultRestSec(exId), exId);
+    }
   }));
+  v.querySelectorAll("[data-plate-calc]").forEach(b => b.addEventListener("click", () => openPlateCalculator(b.dataset.plateCalc)));
+  v.querySelectorAll("[data-ex-hist]").forEach(b => b.addEventListener("click", () => openExerciseHistory(b.dataset.exHist)));
 };
+
+function openExerciseHistory(exId) {
+  const e = EXERCISES[exId];
+  const hist = exerciseHistory(exId, true);
+  const pr = exercisePR(exId, true);
+  if (!hist.length) {
+    openSheet(`${e.name} — History`, `<div class="text-dim small">No sets logged yet. Once you do, this view shows your progression and PRs.</div>`);
+    return;
+  }
+  // Best-set per day for the chart
+  const bestByDay = {};
+  for (const h of hist) {
+    if (!bestByDay[h.d] || h.est1RM > bestByDay[h.d].est1RM) bestByDay[h.d] = h;
+  }
+  const days = Object.keys(bestByDay).sort();
+  const points = days.map(d => ({ d, e: bestByDay[d].est1RM, w: bestByDay[d].w, r: bestByDay[d].r }));
+  const W = 320, H = 130, padL = 28, padR = 6, padT = 10, padB = 18;
+  const vMin = Math.floor(Math.min(...points.map(p => p.e)) - 5);
+  const vMax = Math.ceil(Math.max(...points.map(p => p.e)) + 5);
+  const x = i => padL + (i / Math.max(1, points.length - 1)) * (W - padL - padR);
+  const y = v => padT + (1 - (v - vMin) / (vMax - vMin)) * (H - padT - padB);
+  const path = points.map((p,i) => `${i?'L':'M'}${x(i).toFixed(1)},${y(p.e).toFixed(1)}`).join(" ");
+  const dots = points.map((p,i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.e).toFixed(1)}" r="3" fill="var(--accent)"/>`).join("");
+  const html = `
+    <div class="text-dim small">All-time PR: <b>${pr.w}kg × ${pr.r}</b> (est 1RM ${pr.est1RM}kg) on ${pr.d}</div>
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H+8}" style="margin-top:8px">
+      <text x="2" y="${(y(vMax)+4).toFixed(1)}" font-size="9" fill="var(--text-dim)">${vMax}</text>
+      <text x="2" y="${(y(vMin)-2).toFixed(1)}" font-size="9" fill="var(--text-dim)">${vMin}</text>
+      <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+      ${dots}
+    </svg>
+    <div class="text-dim small" style="margin-top:6px">Best set's est-1RM per session, last ${days.length} day${days.length===1?'':'s'}.</div>
+    <h3 style="margin-top:14px">Recent sessions</h3>
+    ${days.slice(-10).reverse().map(d => {
+      const setsThisDay = hist.filter(h => h.d === d);
+      return `<div class="g-row"><div><b>${d}</b><div class="small text-dim">${setsThisDay.map(s => `${s.w}×${s.r}`).join(", ")}</div></div><div class="g-val g-ok">${Math.max(...setsThisDay.map(s=>s.est1RM))}<span class="small">est 1RM</span></div></div>`;
+    }).join("")}
+  `;
+  openSheet(`${e.name} — History`, html);
+}
 
 function renderMealRow(id, slotIdx) {
   const meal = MEAL_LIBRARY[id];
@@ -439,25 +495,184 @@ function openMealSwap(slotIdx, currentId) {
   });
 }
 
+
+// ===================== Gym helpers =====================
+// Compound lifts get a longer default rest timer.
+const COMPOUND_LIFTS = new Set(["bench","ohp","deadlift","squat","leg_press","pullup","barbell_row","rdl"]);
+function isCompound(exId) { return COMPOUND_LIFTS.has(exId); }
+function defaultRestSec(exId) { return isCompound(exId) ? 150 : 75; }
+
+// Epley one-rep-max estimate: 1RM = w * (1 + r/30). Returns null for invalid.
+function calc1RM(w, r) {
+  w = parseFloat(w); r = parseInt(r);
+  if (isNaN(w) || isNaN(r) || w <= 0 || r <= 0 || r > 12) return null;
+  return Math.round(w * (1 + r / 30) * 10) / 10;
+}
+
+// All recorded sets for an exercise across S.log. Excludes today by default
+// so PR detection compares against history, not against the set being entered.
+function exerciseHistory(exId, includeToday = false) {
+  const out = [];
+  const todayKey = isoDate();
+  for (const [d, dl] of Object.entries(S.log)) {
+    if (!includeToday && d === todayKey) continue;
+    const sets = (dl.workout || {})[exId] || [];
+    sets.forEach((s, i) => {
+      const w = parseFloat(s.w), r = parseInt(s.r);
+      if (!isNaN(w) && !isNaN(r) && w > 0 && r > 0) {
+        out.push({ d, setIdx: i, w, r, est1RM: calc1RM(w, r) || 0 });
+      }
+    });
+  }
+  return out.sort((a, b) => a.d.localeCompare(b.d));
+}
+function exercisePR(exId, includeToday = false) {
+  const hist = exerciseHistory(exId, includeToday);
+  if (!hist.length) return null;
+  let best = hist[0];
+  for (const h of hist) if (h.est1RM > best.est1RM) best = h;
+  return best;
+}
+function exerciseLastSession(exId) {
+  const hist = exerciseHistory(exId, false);
+  if (!hist.length) return null;
+  const lastDay = hist[hist.length - 1].d;
+  return hist.filter(h => h.d === lastDay);
+}
+
+// Plate-calculator: how to load a 20-kg Olympic bar to reach targetKg.
+// Returns the per-side breakdown using standard Norwegian gym plates.
+const PLATES_KG = [25, 20, 15, 10, 5, 2.5, 1.25];
+function platesForSide(targetKg, barKg = 20) {
+  let perSide = (targetKg - barKg) / 2;
+  if (perSide <= 0) return { perSide: [], note: targetKg <= barKg ? `Bar only (${barKg}kg)` : "Too light for bar" };
+  const used = [];
+  for (const p of PLATES_KG) {
+    while (perSide >= p - 0.0001) { used.push(p); perSide -= p; }
+  }
+  if (perSide > 0.001) return { perSide: used, note: `Closest possible — short by ${perSide.toFixed(2)} kg` };
+  return { perSide: used };
+}
+function openPlateCalculator(exId) {
+  const e = EXERCISES[exId];
+  const lastSet = exerciseLastSession(exId);
+  const defaultKg = lastSet && lastSet.length ? Math.max(...lastSet.map(s => s.w)) : 60;
+  const html = `
+    <div class="text-dim small" style="margin-bottom:8px">Bar weight defaults to 20 kg (standard Olympic). Edit to match your equipment.</div>
+    <div class="input-row"><label>Target (kg)</label><input type="number" id="plate-tgt" class="big-input" step="0.5" value="${defaultKg}" style="width:120px" autofocus></div>
+    <div class="input-row"><label>Bar (kg)</label><input type="number" id="plate-bar" class="big-input" step="0.5" value="20" style="width:120px"></div>
+    <div id="plate-result" style="margin-top:10px"></div>
+  `;
+  openSheet(`Plates for ${e.name}`, html, sheet => {
+    const tgt = sheet.querySelector("#plate-tgt");
+    const bar = sheet.querySelector("#plate-bar");
+    const res = sheet.querySelector("#plate-result");
+    const update = () => {
+      const t = parseFloat(tgt.value), b = parseFloat(bar.value) || 20;
+      if (isNaN(t)) { res.innerHTML = ""; return; }
+      const r = platesForSide(t, b);
+      if (!r.perSide.length) { res.innerHTML = `<div class="text-dim small">${r.note}</div>`; return; }
+      const grouped = {};
+      r.perSide.forEach(p => grouped[p] = (grouped[p] || 0) + 1);
+      const chips = Object.entries(grouped).sort(([a],[b]) => parseFloat(b) - parseFloat(a))
+        .map(([p, n]) => `<span class="pre-workout-badge" style="background:var(--accent)20;color:var(--accent);font-size:14px;padding:6px 10px">${n}×${p}kg</span>`).join(" ");
+      res.innerHTML = `
+        <div style="font-size:18px;margin-bottom:6px"><b>Per side</b> (×2 on the bar):</div>
+        <div style="line-height:2">${chips}</div>
+        <div class="text-dim small" style="margin-top:8px">Total: ${b} kg bar + ${(t - b).toFixed(1)} kg plates = <b>${t} kg</b>${r.note ? ` · ${r.note}` : ""}</div>
+      `;
+    };
+    tgt.addEventListener("input", update); bar.addEventListener("input", update); update();
+  });
+}
+
+// ===================== Rest timer =====================
+let restTimer = { interval: null, endsAt: 0, totalSec: 0 };
+function startRestTimer(seconds, exId) {
+  cancelRestTimer();
+  restTimer.totalSec = seconds;
+  restTimer.endsAt = Date.now() + seconds * 1000;
+  ensureRestTimerEl();
+  tickRestTimer(exId);
+  restTimer.interval = setInterval(() => tickRestTimer(exId), 250);
+}
+function cancelRestTimer() {
+  if (restTimer.interval) { clearInterval(restTimer.interval); restTimer.interval = null; }
+  const el = document.getElementById("rest-timer");
+  if (el) el.classList.remove("show");
+}
+function ensureRestTimerEl() {
+  if (document.getElementById("rest-timer")) return;
+  const el = document.createElement("div");
+  el.id = "rest-timer";
+  el.className = "rest-timer";
+  el.innerHTML = `
+    <div class="rt-label">REST</div>
+    <div class="rt-clock" id="rt-clock">0:00</div>
+    <div class="rt-bar"><div class="rt-bar-fill" id="rt-bar-fill"></div></div>
+    <div class="rt-actions">
+      <button class="btn btn-small" id="rt-plus">+15s</button>
+      <button class="btn btn-small" id="rt-skip">Skip</button>
+    </div>
+  `;
+  document.body.appendChild(el);
+  document.getElementById("rt-plus").addEventListener("click", () => { restTimer.endsAt += 15000; restTimer.totalSec += 15; });
+  document.getElementById("rt-skip").addEventListener("click", cancelRestTimer);
+}
+function tickRestTimer(exId) {
+  const el = document.getElementById("rest-timer");
+  const clockEl = document.getElementById("rt-clock");
+  const fillEl = document.getElementById("rt-bar-fill");
+  if (!el || !clockEl || !fillEl) return;
+  el.classList.add("show");
+  const remaining = Math.max(0, restTimer.endsAt - Date.now());
+  const sec = Math.ceil(remaining / 1000);
+  const mm = Math.floor(sec / 60), ss = sec % 60;
+  clockEl.textContent = `${mm}:${ss.toString().padStart(2,"0")}`;
+  const pct = restTimer.totalSec > 0 ? (remaining / (restTimer.totalSec * 1000)) * 100 : 0;
+  fillEl.style.width = `${pct}%`;
+  if (remaining <= 0) {
+    cancelRestTimer();
+    clockEl.textContent = "DONE";
+    if (navigator.vibrate) navigator.vibrate([200, 80, 200]);
+    toast("Rest done — next set!");
+  }
+}
+
 function renderExerciseRow(ex) {
   const e = EXERCISES[ex.id];
   const log = todayLog();
   const sets = log.workout[ex.id] || [];
   const wkIdx = getWeekIndex();
   const factor = PROGRESSION[wkIdx].loadFactor;
+  const pr = exercisePR(ex.id, false);
+  const lastSession = exerciseLastSession(ex.id);
+  const lastSummary = lastSession ? lastSession.map(s => `${s.w}×${s.r}`).join(", ") : null;
   let setRows = "";
   for (let i = 0; i < ex.sets; i++) {
     const s = sets[i] || {};
+    const liveEst = calc1RM(s.w, s.r);
     setRows += `<div class="set-grid">
       <span class="set-num">${i+1}</span>
       <input type="number" inputmode="decimal" placeholder="kg" value="${s.w||''}" data-exid="${ex.id}" data-set="${i}" data-field="w">
       <input type="number" inputmode="numeric" placeholder="reps" value="${s.r||''}" data-exid="${ex.id}" data-set="${i}" data-field="r">
-      <span class="set-num">${s.w&&s.r?'✓':''}</span>
+      <span class="set-num" title="${liveEst ? 'est 1RM '+liveEst+' kg' : ''}">${s.w&&s.r?'✓':''}${liveEst ? ` <span class="text-dim" style="font-size:10px">${liveEst}</span>` : ''}</span>
     </div>`;
   }
+  const prLine = pr
+    ? `<div class="text-dim small">PR: <b>${pr.w}kg × ${pr.r}</b> (est 1RM ${pr.est1RM}kg) · ${pr.d}</div>`
+    : `<div class="text-dim small">No PR yet — your first logged set sets the baseline.</div>`;
+  const lastLine = lastSummary
+    ? `<div class="text-dim small">Last session: ${lastSummary}</div>`
+    : "";
   return `<div class="exercise">
-    <div class="exercise-name">${e.name}</div>
+    <div class="exercise-name">${e.name}
+      <button class="btn-small" data-plate-calc="${ex.id}" style="float:right">🏋️ Plates</button>
+      <button class="btn-small" data-ex-hist="${ex.id}" style="float:right;margin-right:6px">📈 History</button>
+    </div>
     <div class="exercise-sub">${ex.sets} sets × ${ex.reps} · ${e.muscle} · RIR ${ex.rir} · ×${factor.toFixed(3)} load</div>
+    ${prLine}
+    ${lastLine}
     ${ex.note ? `<div class="exercise-note">${ex.note}</div>` : ""}
     ${setRows}
   </div>`;
