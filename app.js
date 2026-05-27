@@ -1202,6 +1202,122 @@ function render7DayGlucose() {
 }
 
 // ===================== STATS VIEW =====================
+
+// ===================== Bulking / trend helpers =====================
+// Daily logged macros for a specific date.
+function loggedMacrosFor(dateKey) {
+  const dl = S.log[dateKey] || {};
+  let kcal = 0, p = 0, c = 0, f = 0;
+  for (const id of dl.mealsDone || []) {
+    const m = mealMacros(id); kcal += m.kcal; p += m.p; c += m.c; f += m.f;
+  }
+  for (const e of dl.extras || []) {
+    const food = FOODS[e.foodId] || S.customFoods[e.foodId]; if (!food) continue;
+    const k = e.g / 100;
+    kcal += (food.kcal||0)*k; p += (food.p||0)*k; c += (food.c||0)*k; f += (food.f||0)*k;
+  }
+  return { kcal: round(kcal), p: round(p,1), c: round(c,1), f: round(f,1) };
+}
+
+// Average daily macros over the last `days` calendar days, EXCLUDING today
+// (since today is still in progress and skews the average down).
+function avgMacrosLast(days = 7) {
+  const totals = { kcal: 0, p: 0, c: 0, f: 0 }; let n = 0;
+  for (let i = 1; i <= days; i++) {
+    const d = isoDate(addDays(new Date(), -i));
+    const dl = S.log[d];
+    // Count a day only if anything was actually logged (meal/extra/water > 0)
+    if (!dl) continue;
+    const hasFood = (dl.mealsDone && dl.mealsDone.length) || (dl.extras && dl.extras.length);
+    if (!hasFood) continue;
+    const m = loggedMacrosFor(d);
+    totals.kcal += m.kcal; totals.p += m.p; totals.c += m.c; totals.f += m.f; n++;
+  }
+  if (n === 0) return null;
+  return { kcal: round(totals.kcal/n), p: round(totals.p/n,1), c: round(totals.c/n,1), f: round(totals.f/n,1), days: n };
+}
+
+// Auto-TDEE estimate using the energy-balance equation:
+//   Δweight (kg) over Δt (days) ≈ (avg_kcal_in - TDEE) / 7700  (1 kg fat ≈ 7700 kcal)
+// Re-arranged: TDEE = avg_kcal_in - (Δweight * 7700 / Δt)
+// Needs ≥2 weight points spaced ≥7 days apart and ≥5 days of logged intake.
+function autoTDEE() {
+  const weights = Object.entries(S.log)
+    .filter(([d, l]) => l.weight)
+    .map(([d, l]) => ({ d, w: l.weight }))
+    .sort((a, b) => a.d.localeCompare(b.d));
+  if (weights.length < 2) return null;
+  const first = weights[0], last = weights[weights.length - 1];
+  const dt = (new Date(last.d) - new Date(first.d)) / 86400000;
+  if (dt < 7) return null;
+  // Average intake over the window between first and last weigh-in
+  const totals = []; 
+  for (let i = 0; i <= dt; i++) {
+    const d = isoDate(addDays(new Date(first.d), i));
+    const dl = S.log[d]; if (!dl) continue;
+    const hasFood = (dl.mealsDone && dl.mealsDone.length) || (dl.extras && dl.extras.length);
+    if (!hasFood) continue;
+    totals.push(loggedMacrosFor(d).kcal);
+  }
+  if (totals.length < 5) return null;
+  const avgIntake = totals.reduce((a,b)=>a+b,0) / totals.length;
+  const dw = last.w - first.w;
+  const tdee = Math.round(avgIntake - (dw * 7700 / dt));
+  const weeklyRate = round(dw / (dt/7), 2);
+  return { tdee, avgIntake: Math.round(avgIntake), dw: round(dw,1), days: Math.round(dt), weeklyRate, windowDays: totals.length };
+}
+
+// Streak: how many consecutive days (ending yesterday) hit a per-day target.
+// fn(dl) -> boolean.
+function streakOf(predicate) {
+  let n = 0;
+  for (let i = 1; i <= 60; i++) { // cap at 60 to bound work
+    const d = isoDate(addDays(new Date(), -i));
+    const dl = S.log[d]; if (!dl) break;
+    if (!predicate(dl)) break;
+    n++;
+  }
+  return n;
+}
+
+// Macros trend graph — two overlaid lines (kcal in vs target) over `days`.
+function renderMacroTrendGraph(days = 14) {
+  const series = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = isoDate(addDays(new Date(), -i));
+    const dl = S.log[d];
+    const hasFood = dl && ((dl.mealsDone && dl.mealsDone.length) || (dl.extras && dl.extras.length));
+    series.push({ d, kcal: hasFood ? loggedMacrosFor(d).kcal : null });
+  }
+  if (series.every(s => s.kcal === null)) return `<div class="text-dim small">No food logged in the last ${days} days.</div>`;
+  const W = 320, H = 130, padL = 28, padR = 6, padT = 10, padB = 18;
+  const target = S.profile.targetKcal;
+  const maxKcal = Math.max(target * 1.3, ...series.map(s => s.kcal || 0));
+  const minKcal = 0;
+  const x = i => padL + (i / (series.length - 1)) * (W - padL - padR);
+  const y = v => padT + (1 - (v - minKcal) / (maxKcal - minKcal)) * (H - padT - padB);
+  let path = "", prevPlotted = false;
+  series.forEach((s, i) => {
+    if (s.kcal !== null) {
+      path += `${prevPlotted ? "L" : "M"}${x(i).toFixed(1)},${y(s.kcal).toFixed(1)}`;
+      prevPlotted = true;
+    } else prevPlotted = false;
+  });
+  const yTgt = y(target);
+  const dots = series.map((s, i) => s.kcal !== null
+    ? `<circle cx="${x(i).toFixed(1)}" cy="${y(s.kcal).toFixed(1)}" r="2.5" fill="var(--accent)"/>`
+    : ""
+  ).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H+8}" style="margin-top:8px">
+    <line x1="${padL}" y1="${yTgt.toFixed(1)}" x2="${W-padR}" y2="${yTgt.toFixed(1)}" stroke="var(--accent-2)" stroke-dasharray="3 3" stroke-opacity="0.7"/>
+    <text x="2" y="${yTgt.toFixed(1)}" font-size="9" fill="var(--accent-2)">tgt</text>
+    <text x="2" y="${(y(maxKcal)+4).toFixed(1)}" font-size="9" fill="var(--text-dim)">${Math.round(maxKcal)}</text>
+    <text x="2" y="${(y(minKcal)-2).toFixed(1)}" font-size="9" fill="var(--text-dim)">0</text>
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/>
+    ${dots}
+  </svg>`;
+}
+
 render.stats = function() {
   const v = document.getElementById("view-stats");
   const logged = loggedMacrosToday();
@@ -1256,8 +1372,81 @@ render.stats = function() {
         </div>
         <button class="btn btn-primary big" id="log-weight">Log today</button>
       </div>
-      ${weights.length > 1 ? renderWeightSparkline(weights) : ""}
+      ${weights.length > 1 ? renderWeightSparkline(weights) : '<div class="text-dim small" style="margin-top:8px">Log weight 2+ times to see a chart.</div>'}
     </div>
+
+    ${(() => {
+      const avg7  = avgMacrosLast(7);
+      const avg30 = avgMacrosLast(30);
+      const tdee  = autoTDEE();
+      if (!avg7 && !avg30 && !tdee) return `<div class="card"><h2>Intake trends</h2><div class="text-dim small">Log meals for at least a few days and you'll see your average intake and an auto-calculated TDEE here.</div></div>`;
+      const aveLine = (lbl, m) => m
+        ? `<div class="row"><div><b>${lbl} (${m.days}d)</b></div><div><b>${m.kcal}</b> kcal · ${m.p}P / ${m.c}C / ${m.f}F</div></div>`
+        : `<div class="text-dim small">${lbl}: not enough data yet</div>`;
+      return `<div class="card">
+        <h2>Intake trends</h2>
+        ${aveLine("Avg last 7", avg7)}
+        ${aveLine("Avg last 30", avg30)}
+        <div class="text-dim small" style="margin-top:8px">Target: ${S.profile.targetKcal} kcal / ${S.profile.targetProtein}P / ${S.profile.targetCarbs}C / ${S.profile.targetFat}F</div>
+        <h2 style="margin-top:14px;margin-bottom:0">Calories — last 14 days</h2>
+        ${renderMacroTrendGraph(14)}
+      </div>`;
+    })()}
+
+    ${(() => {
+      const tdee = autoTDEE();
+      if (!tdee) return `<div class="card"><h2>Auto-TDEE</h2><div class="text-dim small">Log weight twice spaced ≥7 days apart with regular food logging in between, and this card will reverse-engineer your true maintenance calories from your actual results.</div></div>`;
+      const delta = tdee.tdee - S.profile.targetKcal;
+      const bulkOK = tdee.weeklyRate >= 0.2 && tdee.weeklyRate <= 0.6;
+      const advice = bulkOK
+        ? `On track. Your gain rate ${tdee.weeklyRate>0?'+':''}${tdee.weeklyRate} kg/week is in the healthy bulk range (0.2–0.6 kg/wk).`
+        : tdee.weeklyRate < 0.2
+          ? `Slow gain. Bump <b>targetKcal</b> by ~+${Math.max(100, Math.round((0.4 - tdee.weeklyRate) * 7700 / 7))} kcal/day to hit a 0.4 kg/wk bulk pace.`
+          : `Fast gain (${tdee.weeklyRate} kg/wk) — risk of extra fat. Reduce <b>targetKcal</b> by ~${Math.round((tdee.weeklyRate - 0.4) * 7700 / 7)} kcal/day.`;
+      return `<div class="card">
+        <h2>Auto-TDEE (energy-balance estimate)</h2>
+        <div class="row">
+          <div><b style="font-size:24px">${tdee.tdee}</b><div class="small text-dim">est. TDEE</div></div>
+          <div><b style="font-size:24px">${tdee.avgIntake}</b><div class="small text-dim">avg intake</div></div>
+          <div><b style="font-size:24px">${tdee.weeklyRate>0?'+':''}${tdee.weeklyRate}</b><div class="small text-dim">kg / week</div></div>
+          <div><b style="font-size:24px">${tdee.dw>0?'+':''}${tdee.dw}</b><div class="small text-dim">kg over ${tdee.days}d</div></div>
+        </div>
+        <div class="text-dim small" style="margin-top:8px">${advice}</div>
+        <div class="text-dim small" style="margin-top:4px">Calc: ${tdee.avgIntake} kcal avg − (${tdee.dw} kg × 7700 / ${tdee.days} d) = ${tdee.tdee}. Current targetKcal: ${S.profile.targetKcal} (${delta>=0?'+':''}${delta}).</div>
+      </div>`;
+    })()}
+
+    ${(() => {
+      const proteinTgt = S.profile.targetProtein;
+      const kcalTgt = S.profile.targetKcal;
+      const waterTgt = S.profile.targetWaterMl;
+      const protein  = streakOf(dl => loggedMacrosFor(Object.keys(S.log).find(k => S.log[k] === dl) || '') === undefined ? false : true); // ensures we use predicate properly below
+      // Simpler streaks: walk days backward and check totals using loggedMacrosFor by date key
+      function streakKey(predicate) {
+        let n = 0;
+        for (let i = 1; i <= 60; i++) {
+          const d = isoDate(addDays(new Date(), -i));
+          const dl = S.log[d]; if (!dl) break;
+          if (!predicate(d, dl)) break;
+          n++;
+        }
+        return n;
+      }
+      const sP = streakKey((d) => loggedMacrosFor(d).p >= proteinTgt * 0.9);
+      const sK = streakKey((d) => { const k = loggedMacrosFor(d).kcal; return k >= kcalTgt * 0.9 && k <= kcalTgt * 1.1; });
+      const sW = streakKey((d, dl) => (dl.water || 0) >= waterTgt * 0.9);
+      const sG = streakKey((d, dl) => (dl.glucose && dl.glucose.length >= 3));
+      const cell = (lbl, n, hint) => `<div class="micro-cell ${n>=3?'ok':''}"><div class="micro-name">${lbl}</div><div class="micro-val">${n}</div><div class="micro-pct">${hint}</div></div>`;
+      return `<div class="card">
+        <h2>Streaks (ending yesterday)</h2>
+        <div class="micros-grid">
+          ${cell("Protein", sP, `≥${Math.round(proteinTgt*0.9)}g/day`)}
+          ${cell("Calories", sK, `±10% of ${kcalTgt}`)}
+          ${cell("Water", sW, `≥${Math.round(waterTgt*0.9)}ml`)}
+          ${cell("BG checks", sG, `3+ readings/day`)}
+        </div>
+      </div>`;
+    })()}
 
     <div class="card">
       <h2>Vitamin D status (Oslo)</h2>

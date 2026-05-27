@@ -1,6 +1,6 @@
 // Service worker — network-first for our own files (auto-update),
 // cache-first for third-party libraries.
-const CACHE = "luca-bulk-v9";
+const CACHE = "luca-bulk-v10";
 const ASSETS = [
   "./",
   "./index.html",
