@@ -16,10 +16,16 @@ const defaultState = () => ({
   mealOverrides: {},   // { "YYYY-MM-DD": { 0: "bk_skyr", 2: "sn_eggs_nuts" } } — meal index -> mealId
   log: {},
   customFoods: {},
+  measurements: [],    // [{ date, waist, chest, biceps, thighs, neck }]
+  photos: [],          // [{ date, dataUrl, label }]  — JPEG base64, max ~12 entries
   notes: "",
 });
 
 let S = load();
+
+// Migrate older saved state with missing top-level arrays
+if (!Array.isArray(S.measurements)) S.measurements = [];
+if (!Array.isArray(S.photos)) S.photos = [];
 // One-time sync: any insulin settings the user saved into S.profile override
 // the static defaults in PROFILE so helpers read a single source of truth.
 ["insulinCarbRatio","insulinSensitivityFactor","targetBgMmol","insulinDurationHours","basalDoseUnits","programStartDate"].forEach(k => {
@@ -1663,6 +1669,9 @@ render.stats = function() {
       </div>`;
     })()}
 
+    ${renderMeasurementsCard()}
+    ${renderPhotosCard()}
+
     <div class="card">
       <h2>Vitamin D status (Oslo)</h2>
       ${renderVitDStatus()}
@@ -1673,6 +1682,8 @@ render.stats = function() {
     if (isNaN(w)) return;
     todayLog().weight = w; save(); render.stats(); toast(`Weight: ${w} kg`);
   });
+  bindMeasurementsCard();
+  bindPhotosCard();
 };
 function renderWeightSparkline(weights) {
   const w = 300, h = 60, pad = 6;
@@ -1778,6 +1789,27 @@ render.settings = function() {
     </div>
 
     <div class="card">
+      <h2>Import CGM data (Libre / Dexcom CSV)</h2>
+      <div class="text-dim small" style="margin-bottom:8px">
+        Export your CGM history as CSV from LibreView (FreeStyle Libre) or
+        Dexcom Clarity, then pick the file here. Duplicates are skipped.
+      </div>
+      <input type="file" id="cgm-file" accept=".csv,text/csv" style="margin-bottom:6px">
+      <button class="btn btn-primary big" id="cgm-import" style="width:100%">Import readings</button>
+    </div>
+
+    <div class="card">
+      <h2>Backup / restore</h2>
+      <div class="text-dim small" style="margin-bottom:8px">
+        Everything you've logged is stored on this device only. Download a
+        backup file before switching phones, clearing site data, or experimenting.
+      </div>
+      <button class="btn btn-primary big" id="data-export">Download backup (JSON)</button>
+      <input type="file" id="data-file" accept=".json,application/json" style="margin-top:10px">
+      <button class="btn btn-danger big" id="data-import" style="width:100%;margin-top:6px">Restore from backup file</button>
+    </div>
+
+    <div class="card">
       <h2>Danger zone</h2>
       <button class="btn btn-danger big" id="reset-today">Reset today's log</button>
       <button class="btn btn-danger big" id="reset-all" style="margin-top:8px">Erase ALL data</button>
@@ -1818,6 +1850,17 @@ render.settings = function() {
     render.settings();
     toast("Today's log reset");
   });
+  document.getElementById("cgm-import")?.addEventListener("click", () => {
+    const f = document.getElementById("cgm-file").files[0];
+    if (!f) return toast("Choose a CSV file first");
+    importCgmFromFile(f);
+  });
+  document.getElementById("data-export")?.addEventListener("click", exportDataAsJson);
+  document.getElementById("data-import")?.addEventListener("click", () => {
+    const f = document.getElementById("data-file").files[0];
+    if (!f) return toast("Choose a backup JSON file first");
+    importDataFromJson(f);
+  });
   document.getElementById("save-insulin")?.addEventListener("click", () => {
     const icr = parseFloat(document.getElementById("i-icr").value);
     const isf = parseFloat(document.getElementById("i-isf").value);
@@ -1847,6 +1890,259 @@ render.settings = function() {
     location.reload();
   });
 };
+
+
+// ===================== Body measurements & photos =====================
+const MEASUREMENT_FIELDS = [
+  { key: "waist",   label: "Waist (cm)" },
+  { key: "chest",   label: "Chest (cm)" },
+  { key: "biceps",  label: "Biceps R (cm)" },
+  { key: "thighs",  label: "Thigh R (cm)" },
+  { key: "neck",    label: "Neck (cm)" },
+];
+
+function addMeasurement(entry) {
+  S.measurements = S.measurements || [];
+  S.measurements.push({ date: isoDate(), ...entry });
+  S.measurements.sort((a, b) => a.date.localeCompare(b.date));
+  save();
+}
+
+function renderMeasurementsCard() {
+  const ms = S.measurements || [];
+  const latest = ms[ms.length - 1] || {};
+  const lastDate = latest.date || "—";
+  const tinyChart = (key) => {
+    const data = ms.filter(m => m[key]).map(m => ({ d: m.date, v: m[key] }));
+    if (data.length < 2) return "";
+    const W = 80, H = 22, vMin = Math.min(...data.map(p => p.v)) - 0.5, vMax = Math.max(...data.map(p => p.v)) + 0.5;
+    const x = i => (i / (data.length - 1)) * W;
+    const y = v => H - ((v - vMin) / (vMax - vMin)) * H;
+    const path = data.map((p, i) => `${i?'L':'M'}${x(i).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+    return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="vertical-align:middle"><path d="${path}" fill="none" stroke="var(--accent)" stroke-width="1.5"/></svg>`;
+  };
+  const rows = MEASUREMENT_FIELDS.map(f => {
+    const val = latest[f.key];
+    const inp = `<input type="number" inputmode="decimal" step="0.1" min="0" id="m-${f.key}" class="big-input" value="${val||''}" placeholder="${val||'—'}" style="width:90px">`;
+    return `<div class="input-row"><label>${f.label}</label>${inp}<span style="margin-left:auto">${tinyChart(f.key)}</span></div>`;
+  }).join("");
+  const historyHtml = ms.length === 0 ? `<div class="text-dim small">No measurements yet.</div>` : ms.slice(-6).reverse().map(m => {
+    const parts = MEASUREMENT_FIELDS.filter(f => m[f.key] != null).map(f => `${f.key} ${m[f.key]}`).join(" · ");
+    return `<div class="g-row"><div><b>${m.date}</b><div class="small text-dim">${parts}</div></div></div>`;
+  }).join("");
+  return `<div class="card">
+    <h2>Body measurements</h2>
+    <div class="text-dim small" style="margin-bottom:6px">Latest: ${lastDate}. Track once a week, same time of day, after the bathroom.</div>
+    ${rows}
+    <button class="btn btn-primary big" id="save-meas" style="width:100%;margin-top:8px">Save measurements for today</button>
+    <h3 style="margin-top:14px">History</h3>
+    ${historyHtml}
+  </div>`;
+}
+function bindMeasurementsCard() {
+  const btn = document.getElementById("save-meas");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const entry = {};
+    let any = false;
+    for (const f of MEASUREMENT_FIELDS) {
+      const v = parseFloat(document.getElementById(`m-${f.key}`).value);
+      if (!isNaN(v) && v > 0) { entry[f.key] = v; any = true; }
+    }
+    if (!any) return toast("Enter at least one measurement");
+    addMeasurement(entry);
+    render.stats(); toast("Measurements saved");
+  });
+}
+
+// ===================== Progress photos =====================
+const MAX_PHOTOS = 12;
+function compressImage(file, maxWidth = 800, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const ratio = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(img.width * ratio);
+        canvas.height = Math.round(img.height * ratio);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+function renderPhotosCard() {
+  const photos = S.photos || [];
+  const gallery = photos.length === 0
+    ? `<div class="text-dim small">No photos yet. Add one monthly — front, side, back — same lighting/pose.</div>`
+    : photos.slice().reverse().map((p, ri) => {
+      const idx = photos.length - 1 - ri;
+      return `<div style="display:inline-block;margin:4px;text-align:center;vertical-align:top">
+        <img src="${p.dataUrl}" alt="${p.label||p.date}" style="max-width:100px;max-height:140px;border-radius:8px;border:1px solid var(--border)" data-photo-view="${idx}">
+        <div class="small" style="margin-top:2px">${p.label||p.date}</div>
+        <button class="btn-small btn-danger" data-photo-del="${idx}" style="margin-top:2px">×</button>
+      </div>`;
+    }).join("");
+  return `<div class="card">
+    <h2>Progress photos</h2>
+    <div class="text-dim small" style="margin-bottom:6px">Stored locally on this device (no upload). Max ${MAX_PHOTOS} kept — oldest auto-removed. Images compressed to ~800px JPEG.</div>
+    <div class="input-row">
+      <label>Add</label>
+      <input type="file" id="photo-file" accept="image/*" capture="environment" style="flex:1">
+    </div>
+    <div class="input-row">
+      <label>Label</label>
+      <input type="text" id="photo-label" placeholder="e.g. front · week 1" class="big-input" style="flex:1">
+    </div>
+    <button class="btn btn-primary big" id="photo-add" style="width:100%;margin-top:6px">Compress & save</button>
+    <div style="margin-top:12px">${gallery}</div>
+  </div>`;
+}
+function bindPhotosCard() {
+  const addBtn = document.getElementById("photo-add");
+  if (!addBtn) return;
+  addBtn.addEventListener("click", async () => {
+    const file = document.getElementById("photo-file").files[0];
+    if (!file) return toast("Pick an image first");
+    try {
+      const dataUrl = await compressImage(file);
+      const label = document.getElementById("photo-label").value.trim() || isoDate();
+      S.photos = S.photos || [];
+      S.photos.push({ date: isoDate(), dataUrl, label });
+      // Trim to MAX_PHOTOS keeping the most recent
+      if (S.photos.length > MAX_PHOTOS) S.photos = S.photos.slice(-MAX_PHOTOS);
+      try { save(); } catch (e) {
+        toast("Storage full — delete some photos first");
+        S.photos.pop(); return;
+      }
+      render.stats(); toast("Photo saved");
+    } catch (e) {
+      console.error(e);
+      toast("Failed to read image");
+    }
+  });
+  document.querySelectorAll("[data-photo-del]").forEach(b => b.addEventListener("click", () => {
+    const i = parseInt(b.dataset.photoDel);
+    if (!confirm("Delete this photo?")) return;
+    S.photos.splice(i, 1); save(); render.stats(); toast("Deleted");
+  }));
+  document.querySelectorAll("[data-photo-view]").forEach(img => img.addEventListener("click", () => {
+    const i = parseInt(img.dataset.photoView);
+    const p = S.photos[i];
+    openSheet(p.label || p.date, `<img src="${p.dataUrl}" style="width:100%;border-radius:8px">`);
+  }));
+}
+
+// ===================== CGM CSV import (Libre / Dexcom) =====================
+// Best-effort parser. Looks for a header row containing "glucose" and a
+// timestamp-like column. Adds readings to S.log[date].glucose, skipping
+// duplicates (same date + time).
+function parseCgmCsv(text) {
+  const lines = text.split(/\r?\n/).filter(Boolean);
+  let headerIdx = -1, cols = [];
+  for (let i = 0; i < Math.min(40, lines.length); i++) {
+    const lower = lines[i].toLowerCase();
+    if (lower.includes("glucose") && (lower.includes("time") || lower.includes("date"))) {
+      headerIdx = i; break;
+    }
+  }
+  if (headerIdx === -1) throw new Error("Couldn't find a header row with 'glucose' and a time column.");
+  const splitCsv = (line) => {
+    const out = []; let cur = "", inQ = false;
+    for (const ch of line) {
+      if (ch === '"') inQ = !inQ;
+      else if (ch === "," && !inQ) { out.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    out.push(cur); return out.map(s => s.trim().replace(/^"|"$/g, ""));
+  };
+  const header = splitCsv(lines[headerIdx]).map(h => h.toLowerCase());
+  // Find columns
+  const tCol  = header.findIndex(h => /(timestamp|date|time)/.test(h) && !/duration|change/.test(h));
+  const mmolCol = header.findIndex(h => /glucose.*mmol/i.test(h) || (/glucose/.test(h) && /(value|level)/.test(h)));
+  const mgdlCol = header.findIndex(h => /glucose.*mg\/dl/i.test(h));
+  const typeCol = header.findIndex(h => /record type/.test(h));
+  if (tCol === -1 || (mmolCol === -1 && mgdlCol === -1)) {
+    throw new Error("Couldn't identify the timestamp/glucose columns in the CSV header.");
+  }
+  const out = [];
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const row = splitCsv(lines[i]); if (row.length < 2) continue;
+    if (typeCol >= 0) {
+      // Libre: keep 0 (historic) and 1 (scan); skip strip/insulin/notes types
+      const rt = row[typeCol];
+      if (rt && !["0","1"].includes(rt)) continue;
+    }
+    const ts = row[tCol];
+    let v = mmolCol >= 0 ? parseFloat(row[mmolCol]) : parseFloat(row[mgdlCol]) / 18.018;
+    if (!ts || isNaN(v) || v <= 0) continue;
+    // Parse timestamp — try Date, then DD-MM-YYYY HH:MM
+    let dt = new Date(ts);
+    if (isNaN(dt.getTime())) {
+      const m = ts.match(/(\d{1,2})[-/](\d{1,2})[-/](\d{4}) (\d{1,2}):(\d{2})/);
+      if (m) dt = new Date(+m[3], +m[2]-1, +m[1], +m[4], +m[5]);
+    }
+    if (isNaN(dt.getTime())) continue;
+    out.push({ dateKey: isoDate(dt), time: dt.toTimeString().slice(0,5), v: Math.round(v*10)/10 });
+  }
+  return out;
+}
+async function importCgmFromFile(file) {
+  const text = await file.text();
+  let parsed;
+  try { parsed = parseCgmCsv(text); }
+  catch (e) { toast(e.message); return; }
+  if (!parsed.length) { toast("No glucose rows found in CSV"); return; }
+  let added = 0, dup = 0;
+  for (const p of parsed) {
+    if (!S.log[p.dateKey]) {
+      S.log[p.dateKey] = { water: 0, mealsDone: [], glucose: [], weight: null, sun: null, supps: [], extras: [], workout: {}, bolus: [] };
+    }
+    if (!S.log[p.dateKey].glucose) S.log[p.dateKey].glucose = [];
+    const exists = S.log[p.dateKey].glucose.some(g => g.t === p.time && Math.abs(g.v - p.v) < 0.05);
+    if (exists) { dup++; continue; }
+    S.log[p.dateKey].glucose.push({ t: p.time, v: p.v, ctx: "cgm", n: "imported" });
+    added++;
+  }
+  // Resort each day's glucose
+  for (const d of Object.keys(S.log)) {
+    if (S.log[d].glucose) S.log[d].glucose.sort((a,b) => (a.t||"").localeCompare(b.t||""));
+  }
+  save();
+  toast(`Imported ${added} readings (${dup} duplicates skipped)`);
+}
+
+// ===================== JSON export / import =====================
+function exportDataAsJson() {
+  const blob = new Blob([JSON.stringify(S, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `luca-bulk-backup-${isoDate()}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast("Backup downloaded");
+}
+async function importDataFromJson(file) {
+  if (!confirm("Replace ALL current data with the contents of this backup? This cannot be undone.")) return;
+  const text = await file.text();
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch { return toast("Not a valid JSON file"); }
+  if (!parsed || typeof parsed !== "object") return toast("Backup file doesn't look right");
+  // Replace state and persist
+  Object.keys(S).forEach(k => delete S[k]);
+  Object.assign(S, parsed);
+  save();
+  toast("Backup restored — reloading");
+  setTimeout(() => location.reload(), 800);
+}
 
 // ---------- Init ----------
 document.getElementById("page-date").textContent = fmtDate();
