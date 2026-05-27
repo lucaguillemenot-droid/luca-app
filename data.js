@@ -20,6 +20,12 @@ export const PROFILE = {
   targetWaterMl: 3500,
   targetFiber: 30,
   programStartDate: "2026-05-27", // bulk starts this date (YYYY-MM-DD). Plan / meals hidden on the Today tab before this.
+  // ---- T1D insulin settings — confirm with your endo / diabetes nurse before use ----
+  insulinCarbRatio: null,        // grams of carbs covered by 1 unit of rapid-acting insulin. null = not set.
+  insulinSensitivityFactor: null,// mmol/L drop per 1 unit of rapid-acting insulin.    null = not set.
+  insulinDurationHours: 4,       // how long rapid-acting insulin is active (linear-decay model).
+  targetBgMmol: 6.5,             // BG you aim for when correcting.
+  basalDoseUnits: 0,             // long-acting (Lantus/Tresiba) total daily units. 0 = not tracked.
 };
 
 // FOOD DATABASE — values per 100 g/ml. Prices approximate REMA/Kiwi spring 2026.

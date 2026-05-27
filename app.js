@@ -20,6 +20,12 @@ const defaultState = () => ({
 });
 
 let S = load();
+// One-time sync: any insulin settings the user saved into S.profile override
+// the static defaults in PROFILE so helpers read a single source of truth.
+["insulinCarbRatio","insulinSensitivityFactor","targetBgMmol","insulinDurationHours","basalDoseUnits","programStartDate"].forEach(k => {
+  if (S.profile[k] !== undefined && S.profile[k] !== null) PROFILE[k] = S.profile[k];
+});
+
 // Migrate from v1 if present
 if (!localStorage.getItem(KEY)) {
   const old = localStorage.getItem("luca-bulk-v1");
@@ -37,9 +43,11 @@ function save() { localStorage.setItem(KEY, JSON.stringify(S)); }
 function todayLog() {
   const d = isoDate();
   if (!S.log[d]) {
-    S.log[d] = { water: 0, mealsDone: [], glucose: [], weight: null, sun: null, supps: [], extras: [], workout: {} };
+    S.log[d] = { water: 0, mealsDone: [], glucose: [], weight: null, sun: null, supps: [], extras: [], workout: {}, bolus: [] };
     save();
   }
+  // Migration: older logs may be missing bolus[]
+  if (!S.log[d].bolus) S.log[d].bolus = [];
   return S.log[d];
 }
 
@@ -834,6 +842,116 @@ function manualFoodEntry(code) {
 }
 
 // ===================== GLUCOSE VIEW =====================
+
+// ===================== T1D helpers =====================
+// Linear-decay IOB model: a bolus of U units at time t0 contributes
+// (U * (1 - elapsedHours/durationHours)) units of "still active" insulin
+// for the next durationHours, then 0. Real insulin curves are biphasic;
+// linear is the standard simplification used by most calculators.
+function activeBolusUnits(asOf = new Date()) {
+  const dur = (PROFILE.insulinDurationHours || 4);
+  const cutoffMs = asOf.getTime() - dur * 3600 * 1000;
+  let total = 0;
+  // Walk today and yesterday (in case a recent bolus crossed midnight)
+  for (let dayOffset = 0; dayOffset >= -1; dayOffset--) {
+    const dKey = isoDate(addDays(asOf, dayOffset));
+    const dl = S.log[dKey]; if (!dl || !dl.bolus) continue;
+    for (const b of dl.bolus) {
+      // Parse "HH:MM" -> timestamp on that date
+      const [hh, mm] = (b.t || "00:00").split(":").map(Number);
+      const ts = new Date(asOf); ts.setDate(ts.getDate() + dayOffset);
+      ts.setHours(hh, mm, 0, 0);
+      const ageMs = asOf - ts;
+      if (ageMs < 0 || ageMs > dur * 3600 * 1000) continue;
+      const remaining = 1 - (ageMs / (dur * 3600 * 1000));
+      total += (b.units || 0) * remaining;
+    }
+  }
+  return Math.max(0, total);
+}
+
+// Suggested bolus = carb correction + BG correction - IOB.
+// Returns { total, carbPart, correctionPart, iob, warnings[] }.
+function suggestedBolus({ carbs = 0, bg = null }) {
+  const icr = PROFILE.insulinCarbRatio;
+  const isf = PROFILE.insulinSensitivityFactor;
+  const target = PROFILE.targetBgMmol || 6.5;
+  const warnings = [];
+  if (!icr) warnings.push("ICR not set — go to Settings → Insulin.");
+  if (bg != null && !isf) warnings.push("ISF not set — correction skipped.");
+  const carbPart = icr && carbs > 0 ? carbs / icr : 0;
+  const correctionPart = (bg != null && isf) ? Math.max(-10, (bg - target) / isf) : 0;
+  const iob = activeBolusUnits(new Date());
+  const total = Math.max(0, carbPart + correctionPart - iob);
+  if (bg != null && bg < (S.profile.glucoseLowMmol || 4)) warnings.push("BG is in the low range — eat carbs first, do not bolus until BG > low threshold.");
+  if (total > 15) warnings.push("Suggested dose is unusually large (>15U). Double-check carbs and BG, confirm with your nurse.");
+  return { total, carbPart, correctionPart, iob, warnings };
+}
+
+// GMI (Glucose Management Indicator) — Bergenstal 2018 formula.
+// GMI (%) ≈ 3.31 + 0.02392 * mean_mg_dL
+// Mean BG in mg/dL = mean BG in mmol/L * 18.018
+function computeGMI(daysBack = 14) {
+  const readings = [];
+  for (let i = 0; i < daysBack; i++) {
+    const d = isoDate(addDays(new Date(), -i));
+    const dl = S.log[d]; if (!dl || !dl.glucose) continue;
+    for (const g of dl.glucose) readings.push(g.v);
+  }
+  if (readings.length < 5) return null; // need a reasonable sample
+  const meanMmol = readings.reduce((a, b) => a + b, 0) / readings.length;
+  const meanMgDl = meanMmol * 18.018;
+  const gmi = 3.31 + 0.02392 * meanMgDl;
+  return { gmi: round(gmi, 1), meanMmol: round(meanMmol, 1), n: readings.length };
+}
+
+// Glucose history graph as inline SVG.
+// Plots all readings over `daysBack` days, with target range band.
+function renderGlucoseHistoryGraph(daysBack = 14) {
+  const lo = S.profile.glucoseLowMmol || 4;
+  const hi = S.profile.glucoseHighMmol || 10;
+  const now = new Date();
+  const points = [];
+  for (let i = daysBack - 1; i >= 0; i--) {
+    const d = isoDate(addDays(now, -i));
+    const dl = S.log[d]; if (!dl || !dl.glucose) continue;
+    for (const g of dl.glucose) {
+      const [hh, mm] = (g.t || "12:00").split(":").map(Number);
+      const ts = new Date(now); ts.setDate(ts.getDate() - i); ts.setHours(hh, mm, 0, 0);
+      points.push({ t: ts.getTime(), v: g.v });
+    }
+  }
+  if (points.length === 0) {
+    return `<div class="text-dim small">No readings in the last ${daysBack} days yet.</div>`;
+  }
+  points.sort((a, b) => a.t - b.t);
+  const W = 320, H = 140, padL = 24, padR = 4, padT = 8, padB = 16;
+  const tMin = now.getTime() - daysBack * 86400000;
+  const tMax = now.getTime();
+  const vMin = Math.min(3, Math.floor(Math.min(...points.map(p => p.v))));
+  const vMax = Math.max(16, Math.ceil(Math.max(...points.map(p => p.v))));
+  const x = t => padL + ((t - tMin) / (tMax - tMin)) * (W - padL - padR);
+  const y = v => padT + (1 - (v - vMin) / (vMax - vMin)) * (H - padT - padB);
+  const bandTop = y(hi), bandBot = y(lo);
+  const path = points.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(" ");
+  const xAxisLabels = [];
+  for (let i = 0; i <= daysBack; i += Math.max(1, Math.floor(daysBack / 4))) {
+    const t = now.getTime() - (daysBack - i) * 86400000;
+    const d = new Date(t);
+    xAxisLabels.push(`<text x="${x(t).toFixed(1)}" y="${H - 2}" font-size="9" fill="var(--text-dim)" text-anchor="middle">${d.getDate()}/${d.getMonth() + 1}</text>`);
+  }
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H + 10}" style="margin-top:8px">
+    <rect x="${padL}" y="${bandTop}" width="${W - padL - padR}" height="${bandBot - bandTop}" fill="var(--accent)" fill-opacity="0.12"/>
+    <line x1="${padL}" y1="${bandTop}" x2="${W - padR}" y2="${bandTop}" stroke="var(--accent)" stroke-opacity="0.4" stroke-dasharray="2 3"/>
+    <line x1="${padL}" y1="${bandBot}" x2="${W - padR}" y2="${bandBot}" stroke="var(--accent)" stroke-opacity="0.4" stroke-dasharray="2 3"/>
+    <text x="2" y="${bandTop.toFixed(1)}" font-size="9" fill="var(--text-dim)">${hi}</text>
+    <text x="2" y="${bandBot.toFixed(1)}" font-size="9" fill="var(--text-dim)">${lo}</text>
+    <path d="${path}" fill="none" stroke="var(--accent-2)" stroke-width="1.5"/>
+    ${points.map(p => `<circle cx="${x(p.t).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="2" fill="${p.v > hi ? 'var(--danger)' : p.v < lo ? 'var(--accent-2)' : 'var(--accent)'}"/>`).join("")}
+    ${xAxisLabels.join("")}
+  </svg>`;
+}
+
 render.glucose = function() {
   const v = document.getElementById("view-glucose");
   const log = todayLog();
@@ -855,6 +973,11 @@ render.glucose = function() {
   const above = todays.filter(g => g.v > hi).length;
   const below = todays.filter(g => g.v < lo).length;
 
+  const gmi = computeGMI(14);
+  const iob = activeBolusUnits(new Date());
+  const todayBolus = (log.bolus || []).slice().sort((a,b) => (a.t||"").localeCompare(b.t||""));
+  const totalBolusToday = todayBolus.reduce((s, b) => s + (b.units || 0), 0);
+
   v.innerHTML = `
     <div class="card hero">
       <div class="hero-day">Today's blood sugar</div>
@@ -864,6 +987,44 @@ render.glucose = function() {
         <div><b style="font-size:28px;color:var(--accent-2)">${below}</b><div class="small text-dim">below</div></div>
         <div><b style="font-size:28px">${todays.length}</b><div class="small text-dim">readings</div></div>
       </div>
+    </div>
+
+    <div class="card">
+      <h2>Bolus calculator</h2>
+      <div class="text-dim small" style="margin-bottom:8px">
+        Suggests a rapid-acting dose from carbs, current BG, and active insulin (IOB).
+        <b>Informational only — always confirm with your endocrinologist or diabetes nurse.</b>
+      </div>
+      ${!PROFILE.insulinCarbRatio || !PROFILE.insulinSensitivityFactor ? `
+        <div class="vitd-warning" style="margin-bottom:8px">Set your insulin-to-carb ratio (ICR) and insulin sensitivity factor (ISF) in <b>Settings → Insulin</b> before this card becomes useful.</div>
+      ` : `<div class="text-dim small" style="margin-bottom:8px">Your settings: 1U covers ${PROFILE.insulinCarbRatio}g carbs · 1U drops BG by ${PROFILE.insulinSensitivityFactor} mmol/L · target ${PROFILE.targetBgMmol||6.5} mmol/L · insulin lasts ${PROFILE.insulinDurationHours||4}h.</div>`}
+      <div class="input-row">
+        <label>Carbs about to eat (g)</label>
+        <input type="number" id="bolus-carbs" class="big-input" step="1" min="0" placeholder="e.g. 60" style="width:120px">
+      </div>
+      <div class="input-row">
+        <label>Current BG (mmol/L)</label>
+        <input type="number" id="bolus-bg" class="big-input" step="0.1" min="0" placeholder="optional" style="width:120px">
+      </div>
+      <div id="bolus-result" class="text-dim small" style="margin-top:8px">Enter carbs and/or current BG to see a suggestion.</div>
+      <button class="btn btn-primary big" id="bolus-log" style="width:100%; margin-top:10px" disabled>Log this dose →</button>
+    </div>
+
+    <div class="card">
+      <h2>Insulin status</h2>
+      <div class="row">
+        <div><b style="font-size:28px">${iob.toFixed(1)}U</b><div class="small text-dim">active (IOB)</div></div>
+        <div><b style="font-size:28px">${totalBolusToday.toFixed(1)}U</b><div class="small text-dim">bolus today</div></div>
+        <div><b style="font-size:28px">${PROFILE.basalDoseUnits || "—"}${PROFILE.basalDoseUnits ? "U" : ""}</b><div class="small text-dim">basal (set)</div></div>
+        <div><b style="font-size:28px">${gmi ? gmi.gmi + "%" : "—"}</b><div class="small text-dim">GMI (eA1c, ${gmi ? gmi.n + " readings" : "need ≥5"})</div></div>
+      </div>
+      ${todayBolus.length ? `<div class="small" style="margin-top:8px;line-height:1.7">Today's doses: ${todayBolus.map(b => `<span class="pre-workout-badge" style="background:var(--accent-2)20;color:var(--accent-2)">${b.t} · ${b.units}U${b.carbs ? ` (${b.carbs}g)` : ""}</span>`).join(" ")}</div>` : ""}
+    </div>
+
+    <div class="card">
+      <h2>Last 14 days — glucose graph</h2>
+      ${renderGlucoseHistoryGraph(14)}
+      <div class="text-dim small" style="margin-top:4px">Shaded band = your target range (${S.profile.glucoseLowMmol}-${S.profile.glucoseHighMmol} mmol/L).</div>
     </div>
 
     <div class="card">
@@ -955,6 +1116,48 @@ render.glucose = function() {
   `;
 
   // Bindings
+  // Bolus calculator wiring
+  const carbsInput = document.getElementById("bolus-carbs");
+  const bgInput = document.getElementById("bolus-bg");
+  const resultEl = document.getElementById("bolus-result");
+  const logBtn = document.getElementById("bolus-log");
+  let lastSuggestion = null;
+  function refreshBolus() {
+    const carbs = parseFloat(carbsInput.value) || 0;
+    const bgRaw = bgInput.value.trim();
+    const bg = bgRaw === "" ? null : parseFloat(bgRaw);
+    if (carbs === 0 && bg === null) {
+      resultEl.innerHTML = "Enter carbs and/or current BG to see a suggestion.";
+      logBtn.disabled = true; lastSuggestion = null; return;
+    }
+    const sug = suggestedBolus({ carbs, bg });
+    lastSuggestion = { ...sug, carbs, bg };
+    const parts = [];
+    if (sug.carbPart > 0) parts.push(`carbs: <b>+${sug.carbPart.toFixed(1)}U</b>`);
+    if (sug.correctionPart > 0) parts.push(`BG correction: <b>+${sug.correctionPart.toFixed(1)}U</b>`);
+    if (sug.correctionPart < 0) parts.push(`BG (low side): <b>${sug.correctionPart.toFixed(1)}U</b>`);
+    if (sug.iob > 0) parts.push(`IOB: <b>−${sug.iob.toFixed(1)}U</b>`);
+    resultEl.innerHTML = `
+      <div style="font-size:22px;color:var(--text);margin-bottom:4px"><b>${sug.total.toFixed(1)} U</b> suggested</div>
+      ${parts.join(" · ")}
+      ${sug.warnings.length ? sug.warnings.map(w => `<div class="vitd-warning" style="margin-top:6px">${w}</div>`).join("") : ""}
+    `;
+    logBtn.disabled = sug.total <= 0;
+  }
+  carbsInput.addEventListener("input", refreshBolus);
+  bgInput.addEventListener("input", refreshBolus);
+  logBtn.addEventListener("click", () => {
+    if (!lastSuggestion || lastSuggestion.total <= 0) return;
+    const units = parseFloat(prompt(`Confirm dose to log (suggested ${lastSuggestion.total.toFixed(1)}U):`, lastSuggestion.total.toFixed(1)));
+    if (isNaN(units) || units <= 0) return;
+    log.bolus = log.bolus || [];
+    log.bolus.push({
+      t: new Date().toTimeString().slice(0, 5),
+      units, carbs: lastSuggestion.carbs || 0, bg: lastSuggestion.bg || null, type: "meal",
+    });
+    save(); render.glucose(); toast(`+${units}U logged`);
+  });
+
   document.getElementById("gl-save").addEventListener("click", () => {
     const val = parseFloat(document.getElementById("gl-val").value);
     if (isNaN(val)) return toast("Enter a value");
@@ -1148,6 +1351,20 @@ render.settings = function() {
     </div>
 
     <div class="card">
+      <h2>Insulin (T1D)</h2>
+      <div class="text-dim small" style="margin-bottom:8px">
+        These power the bolus calculator and IOB tracking on the Glucose tab.
+        Get the numbers from your endo / diabetes nurse — don't guess.
+      </div>
+      <div class="input-row"><label>ICR (g carbs / 1U)</label><input type="number" id="i-icr" class="big-input" step="0.5" min="0" value="${S.profile.insulinCarbRatio ?? PROFILE.insulinCarbRatio ?? ""}" placeholder="e.g. 10" style="width:100px"></div>
+      <div class="input-row"><label>ISF (mmol/L drop / 1U)</label><input type="number" id="i-isf" class="big-input" step="0.1" min="0" value="${S.profile.insulinSensitivityFactor ?? PROFILE.insulinSensitivityFactor ?? ""}" placeholder="e.g. 2.0" style="width:100px"></div>
+      <div class="input-row"><label>Target BG (mmol/L)</label><input type="number" id="i-tgt" class="big-input" step="0.1" min="3" value="${S.profile.targetBgMmol ?? PROFILE.targetBgMmol ?? 6.5}" style="width:100px"></div>
+      <div class="input-row"><label>Insulin duration (h)</label><input type="number" id="i-dur" class="big-input" step="0.5" min="2" max="8" value="${S.profile.insulinDurationHours ?? PROFILE.insulinDurationHours ?? 4}" style="width:100px"></div>
+      <div class="input-row"><label>Basal total (U/day)</label><input type="number" id="i-basal" class="big-input" step="0.5" min="0" value="${S.profile.basalDoseUnits ?? PROFILE.basalDoseUnits ?? 0}" style="width:100px"></div>
+      <button class="btn btn-primary big" id="save-insulin">Save insulin settings</button>
+    </div>
+
+    <div class="card">
       <h2>About</h2>
       <div class="small text-dim">
         Built for Luca · Oslo · T1D · bulking 75→85 kg.<br>
@@ -1192,10 +1409,31 @@ render.settings = function() {
   document.getElementById("reset-today")?.addEventListener("click", () => {
     if (!confirm("Reset today's log? Logged meals, water, glucose, weight, and workout for today will be cleared.")) return;
     const d = isoDate();
-    S.log[d] = { water: 0, mealsDone: [], glucose: [], weight: null, sun: null, supps: [], extras: [], workout: {} };
+    S.log[d] = { water: 0, mealsDone: [], glucose: [], weight: null, sun: null, supps: [], extras: [], workout: {}, bolus: [] };
     save();
     render.settings();
     toast("Today's log reset");
+  });
+  document.getElementById("save-insulin")?.addEventListener("click", () => {
+    const icr = parseFloat(document.getElementById("i-icr").value);
+    const isf = parseFloat(document.getElementById("i-isf").value);
+    const tgt = parseFloat(document.getElementById("i-tgt").value);
+    const dur = parseFloat(document.getElementById("i-dur").value);
+    const bas = parseFloat(document.getElementById("i-basal").value);
+    if (!isNaN(icr)) S.profile.insulinCarbRatio = icr;
+    if (!isNaN(isf)) S.profile.insulinSensitivityFactor = isf;
+    if (!isNaN(tgt)) S.profile.targetBgMmol = tgt;
+    if (!isNaN(dur)) S.profile.insulinDurationHours = dur;
+    if (!isNaN(bas)) S.profile.basalDoseUnits = bas;
+    // Also mirror onto PROFILE so other code reads consistent values
+    Object.assign(PROFILE, {
+      insulinCarbRatio: S.profile.insulinCarbRatio,
+      insulinSensitivityFactor: S.profile.insulinSensitivityFactor,
+      targetBgMmol: S.profile.targetBgMmol,
+      insulinDurationHours: S.profile.insulinDurationHours,
+      basalDoseUnits: S.profile.basalDoseUnits,
+    });
+    save(); toast("Insulin settings saved");
   });
   document.getElementById("reset-all")?.addEventListener("click", () => {
     if (!confirm("ERASE ALL DATA? This deletes everything stored locally: profile, logs, custom foods, settings. Cannot be undone.")) return;
